@@ -121,6 +121,6 @@ edge cases handled. Use it.
 I read its source to learn two things I couldn't have worked out alone: the remote-token sweep, and
 the synthetic-event byte layout (which it got from [yabai](https://github.com/koekeishiya/yabai) and
 [Hammerspoon](https://github.com/Hammerspoon/hammerspoon)). BigSwitch is the small version. A list,
-a shortcut, no thumbnails, ~450 lines.
+a shortcut, no thumbnails, under 600 lines.
 
 GPL-3, same as AltTab.
