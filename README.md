@@ -81,6 +81,15 @@ worst part: System Settings keeps showing the old toggle switched on while it gr
 `make-cert.sh` makes a local self-signed certificate so the identity stops moving. Password once,
 never again. It can do nothing except sign code. Delete it from Keychain Access to undo.
 
+The flip side, stated plainly: the permission grant is pinned to *that certificate plus the bundle id*,
+so anything else signed with the same key and bundle id would inherit the grant. The key lives in your
+login keychain, so this only matters to something already running as you. Same trade-off every signed
+app on your Mac makes; just don't reuse the key for anything else.
+
+Screen Recording takes effect only for a process started after it was granted. BigSwitch watches for
+the grant and relaunches itself, so you shouldn't have to think about it. If it somehow doesn't, quit it
+and start it again.
+
 ## How it works
 
 Three problems. The obvious fix failed on all three.

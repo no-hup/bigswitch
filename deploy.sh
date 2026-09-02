@@ -19,11 +19,15 @@ fi
 codesign --force --deep --sign "$SIGN" BigSwitch.app 2>/dev/null
 after=$(codesign -d --verbose=4 BigSwitch.app 2>&1 | awk -F= '/^CDHash/{print $2}')
 
-launchctl unload ~/Library/LaunchAgents/com.shaurya.bigswitch.plist 2>/dev/null || true
-pkill -f BigSwitch 2>/dev/null || true
+PLIST=~/Library/LaunchAgents/com.shaurya.bigswitch.plist
+launchctl unload "$PLIST" 2>/dev/null || true
+pkill -x BigSwitch 2>/dev/null || true        # -x: exact process name. -f would also kill an editor with the path open
 sleep 1
+# copy first, swap second: a failed copy must not leave the user with no app at all
+rm -rf /Applications/BigSwitch.app.new
+cp -R BigSwitch.app /Applications/BigSwitch.app.new
 rm -rf /Applications/BigSwitch.app
-cp -R BigSwitch.app /Applications/
+mv /Applications/BigSwitch.app.new /Applications/BigSwitch.app
 
 if [ "$SIGN" != "-" ]; then
     echo "✓ signed with stable identity — permissions survive rebuilds, nothing reset"
@@ -38,6 +42,10 @@ else
     echo "✓ fingerprint unchanged — permissions kept, no prompts"
 fi
 
-launchctl load ~/Library/LaunchAgents/com.shaurya.bigswitch.plist
+if [ -f "$PLIST" ]; then
+    launchctl load "$PLIST"
+else
+    open -a /Applications/BigSwitch.app      # not a login item (fresh clone): just start it
+fi
 sleep 2
-pgrep -lf BigSwitch >/dev/null && echo "✓ running" || echo "✗ not running"
+pgrep -x BigSwitch >/dev/null && echo "✓ running" || echo "✗ not running"

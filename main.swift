@@ -14,11 +14,13 @@ typealias CGSSpaceID = UInt64
 
 @_silgen_name("CGSMainConnectionID")
 func CGSMainConnectionID() -> CGSConnectionID
+// Both return nullable — a display hot-unplug or a WindowServer hiccup can hand back NULL, and a
+// non-optional declaration would turn that into a crash on the next cast.
 @_silgen_name("CGSCopyManagedDisplaySpaces")
-func CGSCopyManagedDisplaySpaces(_ cid: CGSConnectionID) -> CFArray
+func CGSCopyManagedDisplaySpaces(_ cid: CGSConnectionID) -> CFArray?
 @_silgen_name("CGSCopyWindowsWithOptionsAndTags")
 func CGSCopyWindowsWithOptionsAndTags(_ cid: CGSConnectionID, _ owner: Int, _ spaces: CFArray, _ options: Int,
-                                      _ setTags: UnsafeMutablePointer<Int>, _ clearTags: UnsafeMutablePointer<Int>) -> CFArray
+                                      _ setTags: UnsafeMutablePointer<Int>, _ clearTags: UnsafeMutablePointer<Int>) -> CFArray?
 @_silgen_name("CGSCopyWindowProperty") @discardableResult
 func CGSCopyWindowProperty(_ cid: CGSConnectionID, _ wid: CGWindowID, _ property: CFString,
                            _ value: UnsafeMutablePointer<CFTypeRef?>) -> CGError
@@ -48,20 +50,21 @@ let CGS = CGSMainConnectionID()
 private let optionMapped = 2, optionAll = 7
 
 private func spaceIds() -> CFArray {
-    let displays = CGSCopyManagedDisplaySpaces(CGS) as! [NSDictionary]
-    return displays.flatMap { ($0["Spaces"] as! [NSDictionary]).map { $0["id64"] as! CGSSpaceID } } as CFArray
+    displaySpaces().flatMap { $0.spaces } as CFArray
 }
 
 private func windowIds(_ options: Int) -> [CGWindowID] {
     var setTags = 0, clearTags = 0
-    return CGSCopyWindowsWithOptionsAndTags(CGS, 0, spaceIds(), options, &setTags, &clearTags) as! [CGWindowID]
+    return (CGSCopyWindowsWithOptionsAndTags(CGS, 0, spaceIds(), options, &setTags, &clearTags) as? [CGWindowID]) ?? []
 }
 
-/// (display uuid, the Spaces on it) for every display.
+/// (display uuid, the Spaces on it) for every display. Every shape assumption about these private
+/// dictionaries is a soft one: a missing key yields an empty result, never a trap.
 func displaySpaces() -> [(uuid: CFString, spaces: [CGSSpaceID])] {
-    (CGSCopyManagedDisplaySpaces(CGS) as! [NSDictionary]).compactMap { d in
+    ((CGSCopyManagedDisplaySpaces(CGS) as? [NSDictionary]) ?? []).compactMap { d in
         guard let uuid = d["Display Identifier"] as? String else { return nil }
-        return (uuid as CFString, (d["Spaces"] as? [NSDictionary] ?? []).map { $0["id64"] as! CGSSpaceID })
+        let spaces = (d["Spaces"] as? [NSDictionary] ?? []).compactMap { $0["id64"] as? CGSSpaceID }
+        return (uuid as CFString, spaces)
     }
 }
 
@@ -75,9 +78,7 @@ func spaceByWindow() -> [CGWindowID: CGSSpaceID] {
     var map = [CGWindowID: CGSSpaceID]()
     for display in displaySpaces() {
         for sid in display.spaces {
-            var setTags = 0, clearTags = 0
-            let wids = CGSCopyWindowsWithOptionsAndTags(CGS, 0, [sid] as CFArray, optionMapped, &setTags, &clearTags) as! [CGWindowID]
-            for w in wids where map[w] == nil { map[w] = sid }
+            for w in windowsIn(space: sid) where map[w] == nil { map[w] = sid }
         }
     }
     return map
@@ -89,7 +90,18 @@ func spaceOf(_ wid: CGWindowID) -> CGSSpaceID { spaceByWindow()[wid] ?? 0 }
 /// which `spaceOf` cannot answer for a window that joins every Space.
 func windowsIn(space: CGSSpaceID) -> [CGWindowID] {
     var setTags = 0, clearTags = 0
-    return CGSCopyWindowsWithOptionsAndTags(CGS, 0, [space] as CFArray, optionMapped, &setTags, &clearTags) as! [CGWindowID]
+    return (CGSCopyWindowsWithOptionsAndTags(CGS, 0, [space] as CFArray, optionMapped, &setTags, &clearTags) as? [CGWindowID]) ?? []
+}
+
+/// Does `wid` still exist and still belong to `pid`? The list the user picked from can be minutes old:
+/// the app may have quit, and macOS recycles window ids, so a stale id can name a live window of some
+/// other process. Acting on either would switch Space for nothing.
+func windowStillOwned(_ wid: CGWindowID, by pid: pid_t) -> Bool {
+    let info = (CGWindowListCopyWindowInfo([.optionAll], kCGNullWindowID) as? [[String: Any]]) ?? []
+    return info.contains {
+        ($0[kCGWindowNumber as String] as? NSNumber)?.uint32Value == wid &&
+        ($0[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value == pid
+    }
 }
 
 /// Move the display to `space`.
@@ -193,7 +205,6 @@ private func makeKeyWindow(_ psn: inout ProcessSerialNumber, _ wid: CGWindowID) 
 /// budget because the id space is huge and sparse; in practice the match is found within a few dozen ids.
 func axWindow(pid: pid_t, wid: CGWindowID, budgetMs: Double = 500) -> AXUIElement? {
     let axApp = AXUIElementCreateApplication(pid)
-    AXUIElementSetMessagingTimeout(axApp, 0.25)
     var value: CFTypeRef?
     if AXUIElementCopyAttributeValue(axApp, kAXWindowsAttribute as CFString, &value) == .success,
        let windows = value as? [AXUIElement] {
@@ -237,6 +248,8 @@ func focus(_ win: Win) {
     let wasMinimized = win.minimized
     let space = win.space
     DispatchQueue.global(qos: .userInitiated).async {
+        // nothing below may run for a window that is gone — every step would otherwise fire anyway
+        guard !app.isTerminated, windowStillOwned(wid, by: pid) else { return }
         let element = axWindow(pid: pid, wid: wid)
         if wasMinimized, let element {
             AXUIElementSetAttributeValue(element, kAXMinimizedAttribute as CFString, kCFBooleanFalse)
@@ -245,7 +258,7 @@ func focus(_ win: Win) {
         if let element { AXUIElementPerformAction(element, kAXRaiseAction as CFString) }
         app.activate()
         var psn = ProcessSerialNumber()
-        GetProcessForPID_(pid, &psn)
+        guard GetProcessForPID_(pid, &psn) == noErr else { return }   // else psn is kNoProcess
         _SLPSSetFrontProcessWithOptions(&psn, wid, 0x200)
         makeKeyWindow(&psn, wid)
     }
@@ -287,7 +300,9 @@ final class Table: NSTableView {
         switch e.keyCode {
         case 36, 76: onPick?(selectedRow)
         case 53: onCancel?()
-        case 48: selectRow(selectedRow + 1 < numberOfRows ? selectedRow + 1 : 0)   // Tab cycles
+        case 48:                                                                    // Tab cycles
+            guard numberOfRows > 0 else { return }   // selecting row 0 of an empty table raises
+            selectRow(selectedRow + 1 < numberOfRows ? selectedRow + 1 : 0)
         default:
             if let c = e.charactersIgnoringModifiers, let n = Int(c), (1...9).contains(n) { onPick?(n - 1) }
             else { super.keyDown(with: e) }
@@ -315,6 +330,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
     var needsPermission = false
     /// When the panel last opened; used to ignore the focus wobble right after it appears.
     var shownAt = Date.distantPast
+    var permissionPoll: Timer?
 
     func applicationDidFinishLaunching(_ n: Notification) {
         // Window titles on OTHER Spaces are readable only with Screen Recording. Reading a title string is
@@ -325,7 +341,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         //   Accessibility    — the ONLY way to RAISE such a window; WindowServer calls cannot switch Space.
         // Deliberately NOT requested here: prompting at launch means a dialog on every single start while
         // a permission is missing. The panel says what is missing and asks only when the user clicks it.
-        trace("launch (build 2): screenRecording=\(CGPreflightScreenCaptureAccess()) accessibility=\(AXIsProcessTrusted())")
+        trace("launch: screenRecording=\(CGPreflightScreenCaptureAccess()) accessibility=\(AXIsProcessTrusted())")
 
         table = Table()
         table.dataSource = self
@@ -400,7 +416,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
     }
 
     func toggle() {
-        guard panel.isVisible else { return show() }
+        // visible but not key = something stole focus inside the resign-key grace period; the panel is
+        // stranded on screen and Esc cannot reach it. Treat the hotkey as "show" so it re-takes key.
+        guard panel.isVisible, panel.isKeyWindow else { return show() }
         advance()   // repeat presses walk the list, like Command-Tab; Esc or clicking away closes
     }
 
@@ -452,6 +470,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
                 AXIsProcessTrustedWithOptions(["AXTrustedCheckOptionPrompt": true] as CFDictionary)
             }
             NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?\(pane)")!)
+            relaunchWhenGranted()
             return
         }
         guard row >= 0, row < wins.count else { return }
@@ -520,7 +539,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
                        !AXIsProcessTrusted() ? "Accessibility" : nil].compactMap { $0 }.joined(separator: " + ")
         let title = NSTextField(labelWithString: "\(missing) permission needed")
         title.font = .systemFont(ofSize: 17, weight: .medium)
-        let sub = NSTextField(labelWithString: "Screen Recording reads window titles; Accessibility switches to them. Click to open Settings.")
+        let sub = NSTextField(labelWithString: "Screen Recording reads window titles; Accessibility switches to them. Click to open Settings — once both are granted, BigSwitch relaunches itself.")
         sub.font = .systemFont(ofSize: 12)
         sub.textColor = .tertiaryLabelColor
         let stack = NSStackView(views: [title, sub])
@@ -535,6 +554,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
             stack.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
         ])
         return cell
+    }
+
+    /// Screen Recording only takes effect for a process started AFTER it was granted. Without this, a
+    /// user who grants it in Settings comes back to the same "permission needed" row for as long as the
+    /// app stays running — which, for a login item, is until the next reboot. Watch for both grants and
+    /// relaunch. Gives up after ten minutes so an abandoned Settings pane does not leave a timer forever.
+    func relaunchWhenGranted() {
+        permissionPoll?.invalidate()
+        let deadline = Date().addingTimeInterval(600)
+        permissionPoll = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] t in
+            if Date() > deadline { t.invalidate(); return }
+            guard CGPreflightScreenCaptureAccess(), AXIsProcessTrusted() else { return }
+            t.invalidate()
+            self?.relaunch()
+        }
+    }
+
+    func relaunch() {
+        guard Bundle.main.bundleIdentifier != nil else { return }   // bare binary (tests): nothing to relaunch
+        let cfg = NSWorkspace.OpenConfiguration()
+        cfg.createsNewApplicationInstance = true
+        NSWorkspace.shared.openApplication(at: Bundle.main.bundleURL, configuration: cfg) { _, error in
+            if error == nil { DispatchQueue.main.async { exit(0) } }
+        }
     }
 
     func windowDidResignKey(_ n: Notification) {
@@ -582,9 +625,6 @@ func runSelfTest(_ d: AppDelegate) {
     }
 }
 
-/// Reproduces the "panel opens on the desktop instead of over my fullscreen window" report:
-/// go to a fullscreen Space, open the panel, and ask the WindowServer where the panel actually IS
-/// and whether any of it is on screen.
 /// Regression test for "the panel opens on the desktop, not over my fullscreen window".
 ///
 /// The panel was never on the wrong Space — Space membership passed even while the bug was live, which
@@ -625,6 +665,11 @@ func runFullscreenTest(_ d: AppDelegate) {
         }
     }
 }
+
+// One cap on every Accessibility message this process sends, forged elements included. Set on the
+// system-wide element it becomes the process default; without it each probe against a beach-balling
+// app waits the stock ~6 s, and the sweep's time budget — checked only between probes — means nothing.
+AXUIElementSetMessagingTimeout(AXUIElementCreateSystemWide(), 0.25)
 
 if CommandLine.arguments.contains("dump") {
     for w in listWindows() {
