@@ -1,43 +1,36 @@
 # BigSwitch
 
-A window switcher for macOS that shows **every open window as a big, readable list** — including
-windows on other Spaces and fullscreen windows, which Mission Control shows as unlabelled thumbnails
-and which `Cmd-Tab` does not show at all.
+Ten windows open. Mission Control gives you ten grey rectangles the size of postage stamps.
+Cmd-Tab gives you apps, not windows. Neither one tells you which VS Code window is which project.
 
-Press `⌥ Option + Tab`:
+BigSwitch is `⌥ Option + Tab`, and a list you can actually read.
 
 ```
-1  ⧉  empty                         Code · Claude code thinking visualisation
-2  ⧉  benefills-emergent            Code · Benefits.com migration tracker
-3  ⧉  plattr-pro                    Code · Codebase and tech stack review
-4  ◉  Best coding tool for AI subs  Google Chrome
-5  ◐  dating-assist                 Code · Plan ads launch · minimized
+┌──────────────────────────────────────────────────────────────┐
+│  1  ⧉  empty                    Code · Claude code thinking  │
+│  2  ⧉  benefills-emergent       Code · Benefits.com migrat…  │
+│  3  ⧉  plattr-pro               Code · Codebase review       │
+│  4  ◉  Best coding tool for AI  Google Chrome                │
+│  5  ◐  dating-assist            Code · Plan ads · minimized  │
+└──────────────────────────────────────────────────────────────┘
 ```
 
-Built because with ten windows open — mostly VS Code and Chrome — Mission Control's tiles are too
-small to tell apart, and it never shows window titles.
+Project name first, because that's what you're actually looking for. VS Code titles read
+`some file — my-project`, so the part after the dash gets promoted and the rest goes grey.
 
-## Why it exists
-
-Mission Control scales its tiles to fit however many windows you have, and there is no setting to
-make them bigger. With ten windows you get ten tiny screenshots and no text. BigSwitch shows the
-title instead, which is the thing you actually navigate by.
-
-For editors it promotes the **project name** to the headline: VS Code titles look like
-`some file — my-project`, and `my-project` is what you are looking for.
+Fullscreen windows show up. Windows on other Spaces show up. Minimized ones sit at the bottom.
 
 ## Install
 
 ```sh
-git clone https://github.com/no-hup/bigswitch
-cd bigswitch
-./make-cert.sh     # one-time: local signing identity (see "Permissions" below)
-./deploy.sh        # build, install to /Applications, start
+git clone https://github.com/no-hup/bigswitch && cd bigswitch
+./make-cert.sh    # once. see "the certificate" below
+./deploy.sh       # build, install, run
 ```
 
-Then press `⌥ Option + Tab` and grant the two permissions it asks for.
+Hit `⌥ Option + Tab`, grant the two permissions it asks for, done.
 
-To start it at login:
+Start it at login:
 
 ```sh
 cp com.shaurya.bigswitch.plist ~/Library/LaunchAgents/
@@ -46,88 +39,88 @@ launchctl load ~/Library/LaunchAgents/com.shaurya.bigswitch.plist
 
 ## Keys
 
-| Key | Action |
+| | |
 |---|---|
-| `⌥ Option + Tab` | open; press again to move down the list |
-| `↑` `↓` | move selection |
-| `1`–`9` | jump straight to that window |
-| `Return` / click | switch to selected window |
-| `Esc` / click away | close |
+| `⌥ Option + Tab` | open. press again to walk down |
+| `1`–`9` | jump straight there |
+| `↑ ↓` then `Return` | or click |
+| `Esc` | close |
 
-## Permissions, and why each is genuinely required
+## The two permissions
 
-BigSwitch needs **two** permissions. Both are load-bearing; this was measured, not assumed.
+Neither is optional, and I checked rather than guessed.
 
-| Permission | Used for | Why nothing else works |
-|---|---|---|
-| **Screen Recording** | reading window **titles** | The Accessibility API only lists windows on the *current* Space. Measured on a real setup: it reported **5 of VS Code's 9 windows** — every fullscreen window was invisible to it. Only the WindowServer sees them all, and reading any window title through it is gated behind this permission. |
-| **Accessibility** | **raising** the chosen window | The WindowServer can see windows but cannot bring one forward. Verified failing five different ways, including from an active app. |
+**Accessibility** can't see your fullscreen windows. On a real setup it reported 5 of VS Code's
+9 windows. The 4 fullscreen ones were invisible. So it can't build the list.
 
-**BigSwitch does not record or capture anything.** "Screen Recording" is macOS's name for one
-permission covering two abilities: reading window titles, and reading window pixels. This program
-only does the first — a single string per window, read when you press the shortcut. You can check:
+**The WindowServer** sees all 9 with titles, but can't bring one forward. Verified failing five
+different ways, including from an active app.
+
+So: WindowServer finds them, Accessibility raises them. That's why AltTab asks for both too.
+
+### It does not record your screen
+
+"Screen Recording" is one macOS permission covering two abilities: reading window *titles* and
+reading window *pixels*. This reads titles. One string per window, when you press the shortcut.
+
+Don't take my word for it:
 
 ```sh
-grep -rE 'CGWindowListCreateImage|CGDisplayCreateImage|SCStream|CGDisplayStream' main.swift
-nm -u /Applications/BigSwitch.app/Contents/MacOS/BigSwitch | grep -iE 'capture|CGImage|SCStream'
+grep -rE 'CGWindowListCreateImage|CGDisplayCreateImage|SCStream' main.swift
+nm -u /Applications/BigSwitch.app/Contents/MacOS/BigSwitch | grep -iE 'capture|CGImage'
 ```
 
-Both come back empty. The capture APIs are not called and are not linked into the binary.
+Both empty. The capture APIs aren't called and aren't linked in.
 
-### Why `make-cert.sh` exists
+### The certificate
 
-macOS remembers a permission grant against an app's *identity*. An ad-hoc-signed app has none, so
-macOS falls back to a hash of the binary — and **every rebuild then looks like a brand-new app that
-must be re-granted**, while System Settings still shows the old entry switched on, granting nothing.
+macOS pins a permission grant to an app's identity. Ad-hoc signed apps don't have one, so it falls
+back to hashing the binary, and every rebuild becomes a stranger that has to be granted again. The
+worst part: System Settings keeps showing the old toggle switched on while it grants nothing.
 
-`make-cert.sh` creates a local self-signed code-signing certificate in your login keychain, so the
-app's identity becomes "this bundle id, signed by this certificate" — stable across rebuilds. It
-asks for your password once (changing keychain trust settings requires it) and never again.
-
-The certificate can do nothing but sign code. To remove it: Keychain Access → delete
-"BigSwitch Local Signing".
+`make-cert.sh` makes a local self-signed certificate so the identity stops moving. Password once,
+never again. It can do nothing except sign code. Delete it from Keychain Access to undo.
 
 ## How it works
 
-Three problems, three mechanisms:
+Three problems. The obvious fix failed on all three.
 
-1. **Finding every window.** `CGSCopyWindowsWithOptionsAndTags` over every Space returns all window
-   ids including fullscreen and minimized ones; titles come from `CGSCopyWindowProperty`. Windows
-   with empty titles are skipped — Electron apps pair each real window with an untitled ghost.
+**Finding windows.** `kAXWindows` skips anything on another Space, so window ids come from
+`CGSCopyWindowsWithOptionsAndTags` across every Space, titles from `CGSCopyWindowProperty`. Empty
+titles get dropped, since Electron apps pair every real window with an untitled ghost.
 
-2. **Getting a handle to raise.** `kAXWindows` omits other-Space windows entirely. For those, an
-   element is forged from a *remote token* (pid + magic + element id) and element ids are walked
-   until one reports the window id we want — typically found within a few dozen ids, in ~20ms.
-   Bounded by a time budget.
+**Getting something to raise.** There's no window-id-to-AX-element call. So you forge an element
+from a remote token (pid, magic number, element id) and walk ids until one reports the window id you
+wanted. Usually a few dozen ids, about 20ms. Time-boxed so it can't hang.
 
-3. **Actually switching.** Activating an app is the usual way to reach another Space, but it does
-   nothing when the target belongs to the app that is **already frontmost** — switching between two
-   fullscreen VS Code windows, the main case here. So the Space change is requested directly via
-   `CGSManagedDisplaySetCurrentSpace`, then the window is raised.
+**Switching.** Activating an app usually carries you to its Space, but does nothing when the target
+belongs to the app that's already frontmost, which is exactly the case when you're moving between
+two fullscreen VS Code windows. So ask for the Space directly with
+`CGSManagedDisplaySetCurrentSpace`, then raise.
 
-These are private, undocumented APIs. They can break in a future macOS release.
+All private API. A macOS update could break any of it.
 
-## Development
+## Hacking on it
 
 ```sh
-./deploy.sh              # build, install, restart
-./bigswitch dump         # print the window list as the app sees it
-./bigswitch selftest     # drive the real UI end-to-end and assert it works
+./deploy.sh          # build, install, restart
+./bigswitch dump     # the window list as the app sees it
+./bigswitch selftest # drives the real UI, asserts it actually switched
 ```
 
-`selftest` opens the panel, checks it did not drag you to another Space, checks repeat presses
-advance the selection, then switches to an off-Space window and asserts the Space actually changed.
-Run it after any change.
+`selftest` opens the panel, checks it didn't yank you to another Space, checks repeat presses walk
+the list, then switches to an off-Space window and confirms the Space changed. Run it after changes.
 
-Configure which apps sort first via `priorityApps` at the top of `main.swift`.
+Which apps sort first: `priorityApps` at the top of `main.swift`.
 
-## Credits
+## Not AltTab
 
-The two hardest mechanisms were learned by reading [AltTab](https://github.com/lwouis/alt-tab-macos)
-(GPL-3), whose source documents the remote-token sweep and the synthetic-event byte layout — the
-latter tracing back to [yabai](https://github.com/koekeishiya/yabai) and
-[Hammerspoon](https://github.com/Hammerspoon/hammerspoon). If you want a mature, thumbnail-capable
-switcher with settings and support, use AltTab. BigSwitch is a deliberately small alternative: a
-list, a shortcut, no thumbnails.
+[AltTab](https://github.com/lwouis/alt-tab-macos) is the mature one. Thumbnails, settings, years of
+edge cases handled. Use it.
 
-Licensed GPL-3, matching AltTab.
+I read its source to learn two things I couldn't have worked out alone: the remote-token sweep, and
+the synthetic-event byte layout (which it got from [yabai](https://github.com/koekeishiya/yabai) and
+[Hammerspoon](https://github.com/Hammerspoon/hammerspoon)). BigSwitch is the small version. A list,
+a shortcut, no thumbnails, ~450 lines.
+
+GPL-3, same as AltTab.
