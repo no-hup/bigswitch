@@ -1,0 +1,4 @@
+bigswitch
+BigSwitch.app/Contents/MacOS/
+BigSwitch.app/Contents/_CodeSignature/
+.DS_Store
