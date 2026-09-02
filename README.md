@@ -106,7 +106,11 @@ All private API. A macOS update could break any of it.
 ./deploy.sh          # build, install, restart
 ./bigswitch dump     # the window list as the app sees it
 ./bigswitch selftest # drives the real UI, asserts it actually switched
+./bigswitch fstest   # asserts the panel draws in FRONT on a fullscreen Space
 ```
+
+Run these on an idle machine. They move Spaces and post real keystrokes, so touching the
+keyboard mid-run corrupts the result.
 
 `selftest` opens the panel, checks it didn't yank you to another Space, checks repeat presses walk
 the list, then switches to an off-Space window and confirms the Space changed. Run it after changes.

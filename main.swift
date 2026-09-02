@@ -85,6 +85,13 @@ func spaceByWindow() -> [CGWindowID: CGSSpaceID] {
 
 func spaceOf(_ wid: CGWindowID) -> CGSSpaceID { spaceByWindow()[wid] ?? 0 }
 
+/// Window ids mapped on one specific Space. Needed to ask "is this window on the Space I am on",
+/// which `spaceOf` cannot answer for a window that joins every Space.
+func windowsIn(space: CGSSpaceID) -> [CGWindowID] {
+    var setTags = 0, clearTags = 0
+    return CGSCopyWindowsWithOptionsAndTags(CGS, 0, [space] as CFArray, optionMapped, &setTags, &clearTags) as! [CGWindowID]
+}
+
 /// Move the display to `space`.
 ///
 /// Activating an app is the usual way to reach another Space, but it does nothing when the target window
@@ -365,8 +372,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         panel.hasShadow = true
         panel.hidesOnDeactivate = false
         panel.isReleasedWhenClosed = false
-        panel.level = .modalPanel
-        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        // LEVEL MATTERS MORE THAN IT LOOKS. A fullscreen app puts a window at level 26 (measured: VS
+        // Code fullscreen, z-order index 0). At .modalPanel (8) this panel was correctly ON the Space
+        // but stacked UNDERNEATH that window, so it was invisible on every fullscreen Space and only
+        // showed up on the desktop. .popUpMenu (101) clears it — the level AltTab uses, high enough to
+        // also sit above context menus.
+        panel.isFloatingPanel = true
+        panel.level = .popUpMenu
+        panel.collectionBehavior = .canJoinAllSpaces
         panel.contentView = blur
         panel.delegate = self
 
@@ -569,6 +582,50 @@ func runSelfTest(_ d: AppDelegate) {
     }
 }
 
+/// Reproduces the "panel opens on the desktop instead of over my fullscreen window" report:
+/// go to a fullscreen Space, open the panel, and ask the WindowServer where the panel actually IS
+/// and whether any of it is on screen.
+/// Regression test for "the panel opens on the desktop, not over my fullscreen window".
+///
+/// The panel was never on the wrong Space — Space membership passed even while the bug was live, which
+/// is what made this hard to see. It was STACKING: a fullscreen app keeps a window at level 26, and the
+/// panel sat at level 8, so it was present and buried. So assert on the front-to-back order of what is
+/// actually on screen, never on Space membership.
+///
+/// Run this on an idle machine: it drives real Spaces and real keypresses, and anything you do
+/// meanwhile (closing the panel, switching Space) will corrupt the result.
+func runFullscreenTest(_ d: AppDelegate) {
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+        let home = currentSpace()
+        guard let fs = listWindows().first(where: { !$0.minimized && $0.space != home })?.space
+        else { print("FSTEST: no other Space to test with"); exit(1) }
+        switchTo(space: fs)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+            let landed = currentSpace()
+            guard landed == fs else {
+                print("FSTEST: INCONCLUSIVE — asked for \(fs), landed on \(landed)")
+                switchTo(space: home); exit(2)
+            }
+            d.show()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+                // kCGWindowListOptionOnScreenOnly returns windows front to back
+                let onscreen = (CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]]) ?? []
+                let owners = onscreen.compactMap { ($0[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value }
+                let me = ProcessInfo.processInfo.processIdentifier
+                let panelIndex = owners.firstIndex(of: me)
+                let otherIndex = owners.firstIndex(where: { $0 != me })
+                print("FSTEST: Space \(landed), panel level \(d.panel.level.rawValue)")
+                let ok = panelIndex != nil && (otherIndex == nil || panelIndex! < otherIndex!)
+                print(ok ? "FSTEST: PASS — panel draws in front on a fullscreen Space"
+                         : "FSTEST: FAIL — panel is behind (index \(String(describing: panelIndex)) vs \(String(describing: otherIndex)))")
+                d.hide()
+                switchTo(space: home)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { exit(ok ? 0 : 1) }
+            }
+        }
+    }
+}
+
 if CommandLine.arguments.contains("dump") {
     for w in listWindows() {
         let p = split(w)
@@ -582,5 +639,6 @@ let delegate = AppDelegate()
 app.delegate = delegate
 app.setActivationPolicy(.accessory)
 if CommandLine.arguments.contains("selftest") { runSelfTest(delegate) }
+if CommandLine.arguments.contains("fstest") { runFullscreenTest(delegate) }
 app.run()
 
