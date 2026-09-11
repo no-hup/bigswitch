@@ -137,3 +137,7 @@ the synthetic-event byte layout (which it got from [yabai](https://github.com/ko
 a shortcut, no thumbnails, under 600 lines.
 
 GPL-3, same as AltTab.
+
+---
+
+If BigSwitch is doing the job, or you copied something out of `main.swift`, a star helps other people find it.
